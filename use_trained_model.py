@@ -1,6 +1,5 @@
-"""
-使用訓練好的深度學習模型進行影像增強
-"""
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 import torch
 import cv2
@@ -21,7 +20,7 @@ class EnhancementPredictor:
         初始化預測器
         
         Args:
-            model_path: 訓練好的模型路徑 (例如: 'results/dl_optimizer/best_model.pth')
+            model_path: results/dl_optimizer/best_model.pth
             device: 'cuda' 或 'cpu'
         """
         self.device = device if torch.cuda.is_available() else 'cpu'
@@ -226,7 +225,7 @@ def example_custom_enhancement():
     )
     
     # 讀取影像
-    img = cv2.imread('D:/rop/UIEBD/raw-890/100_img.png')
+    img = cv2.imread("D:/rop/UIEBD/raw-890/raw-890/8_img_.png")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     
     # 方案 A: 使用模型預測的參數
@@ -272,7 +271,7 @@ def example_compare_results():
     
     # 增強
     enhanced, params = predictor.process_single_image(
-        'D:/rop/UIEBD/raw-890/100_img.png',
+        'D:/rop/UIEBD/raw-890/raw-890/8_img_.png',
         show_params=True
     )
     

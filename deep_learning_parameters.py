@@ -1,5 +1,3 @@
-
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -59,7 +57,7 @@ class ReferenceLoss(nn.Module):
     """
     L1  L2 loss
     """
-    def __init__(self, l1_weight=0.5, l2_weight=0.5):
+    def __init__(self, l1_weight=0.7, l2_weight=0.3):
         super().__init__()
         self.l1_weight = l1_weight
         self.l2_weight = l2_weight
@@ -135,10 +133,9 @@ class ParameterOptimizer:
     def __init__(self, model, device='cuda'):
         self.model = model.to(device)
         self.device = device
-        self.criterion = ReferenceLoss(l1_weight=0.5, l2_weight=0.5)
+        self.criterion = ReferenceLoss(l1_weight=0.7, l2_weight=0.3)
         self.optimizer = optim.Adam(model.parameters(), lr=1e-4)
         
-        # 導入增強策略
         from enhancement_strategies import EnhancementStrategies
         self.enhancer = EnhancementStrategies()
         
@@ -149,7 +146,7 @@ class ParameterOptimizer:
             img: numpy array (H, W, 3), [0, 1]
             params: dict of parameters
         """
-        # 轉換參數為字典格式
+        
         param_dict = {
             'use_dehazing': True,
             'omega': float(params['omega']) if not isinstance(params['omega'], float) else params['omega'],
@@ -179,7 +176,6 @@ class ParameterOptimizer:
             # 預測參數
             predicted_params = self.model(features)
             
-            # 🆕 簡單的損失：讓參數在合理範圍內
             loss = 0
             
             # omega 接近 0.5
@@ -200,7 +196,7 @@ class ParameterOptimizer:
             # use_gamma 接近 0.5
             loss += torch.mean((predicted_params['use_gamma'] - 0.5) ** 2)
             
-            # 反向傳播
+            # backpropagation
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -257,7 +253,7 @@ class ParameterOptimizer:
         return avg_loss, avg_losses
     
     def predict_parameters(self, img_features):
-        """預測單張影像的最佳參數"""
+        """predict parameters for a single image"""
         self.model.eval()
         
         with torch.no_grad():
@@ -291,7 +287,7 @@ def train_parameter_optimizer(
     image_folder,
     reference_folder,
     output_folder,
-    num_epochs=50,
+    num_epochs=100,
     batch_size=4,
     device='cuda'
 ):
@@ -309,7 +305,7 @@ def train_parameter_optimizer(
     from feature_extraction import FeatureExtractor
     
     print("=" * 60)
-    print("深度學習參數優化訓練")
+    print("deep learnuing parameter optimizer training")
     print("=" * 60)
     
     # 創建輸出資料夾
