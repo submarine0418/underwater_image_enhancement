@@ -24,6 +24,15 @@ class ParameterPredictor(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.3),
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU()
         )
@@ -165,53 +174,61 @@ class ParameterOptimizer:
         return enhanced
     
     def train_epoch(self, dataloader):
-        """訓練一個 epoch"""
-        self.model.train()
-        total_loss = 0
-        losses = {'l1': 0, 'l2': 0}
-        
-        for batch_idx, batch in enumerate(dataloader):
-            features = batch['features'].to(self.device)
-            
-            # 預測參數
-            predicted_params = self.model(features)
-            
-            loss = 0
-            
-            # omega 接近 0.5
-            loss += torch.mean((predicted_params['omega'] - 0.5) ** 2)
-            
-            # gamma 接近 1.2  
-            loss += torch.mean((predicted_params['gamma'] - 1.2) ** 2)
-            
-            # L_low 接近 15
-            loss += torch.mean((predicted_params['L_low'] - 15.0) ** 2) * 0.01
-            
-            # L_high 接近 90
-            loss += torch.mean((predicted_params['L_high'] - 90.0) ** 2) * 0.01
-            
-            # guided_radius 接近 15
-            loss += torch.mean((predicted_params['guided_radius'] - 15.0) ** 2) * 0.01
-            
-            # use_gamma 接近 0.5
-            loss += torch.mean((predicted_params['use_gamma'] - 0.5) ** 2)
-            
-            # backpropagation
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-            
-            total_loss += loss.item()
-            losses['l1'] = loss.item()
-            losses['l2'] = 0
-            
-            if batch_idx % 10 == 0:
-                print(f'  Batch {batch_idx}/{len(dataloader)}: Loss={loss.item():.4f}')
-        
-        avg_loss = total_loss / len(dataloader)
-        avg_losses = {k: v / len(dataloader) for k, v in losses.items()}
-        
-        return avg_loss, avg_losses
+            """訓練一個 epoch（使用 reference 的 L1/L2 做監督）"""
+            self.model.train()
+            total_loss = 0.0
+            losses = {'l1': 0.0, 'l2': 0.0}
+
+            for batch_idx, batch in enumerate(dataloader):
+                images = batch['image'].to(self.device)        # (B, C, H, W)
+                references = batch['reference'].to(self.device)
+                features = batch['features'].to(self.device)
+
+                # 預測參數 (dict of tensors)
+                predicted_params = self.model(features)
+
+                # 對每張影像應用增強（使用預測參數）
+                batch_size = images.shape[0]
+                enhanced_images = []
+
+                for i in range(batch_size):
+                    img_np = images[i].cpu().permute(1, 2, 0).numpy()  # H,W,3 in [0,1]
+
+                    # 取出對應的參數並轉為 Python float / int
+                    img_params = {}
+                    for k, v in predicted_params.items():
+                        # v[i] is a 0-d or 1-element tensor; use item() safely
+                        val = v[i].cpu().item()
+                        img_params[k] = val
+
+                    # 應用增強（回傳 numpy H,W,3）
+                    enhanced_np = self.apply_enhancement_with_params(img_np, img_params)
+
+                    # 轉回 tensor (1, C, H, W)
+                    enhanced_tensor = torch.from_numpy(enhanced_np).permute(2, 0, 1).unsqueeze(0).float()
+                    enhanced_images.append(enhanced_tensor)
+
+                enhanced_batch = torch.cat(enhanced_images, dim=0).to(self.device)
+
+                # 使用 ReferenceLoss 計算 L1+L2 損失（直接以影像差距監督）
+                loss, loss_dict = self.criterion(enhanced_batch, references)
+
+                # 反向更新
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+                total_loss += loss.item()
+                losses['l1'] += loss_dict.get('l1', 0.0)
+                losses['l2'] += loss_dict.get('l2', 0.0)
+
+                if batch_idx % 10 == 0:
+                    print(f'  Batch {batch_idx}/{len(dataloader)}: Loss={loss.item():.4f} (L1={loss_dict.get("l1",0.0):.4f}, L2={loss_dict.get("l2",0.0):.4f})')
+
+            avg_loss = total_loss / len(dataloader)
+            avg_losses = {k: v / len(dataloader) for k, v in losses.items()}
+
+            return avg_loss, avg_losses
     
     def validate(self, dataloader):
         """驗證"""
@@ -287,8 +304,8 @@ def train_parameter_optimizer(
     image_folder,
     reference_folder,
     output_folder,
-    num_epochs=100,
-    batch_size=4,
+    num_epochs=10,
+    batch_size=5,
     device='cuda'
 ):
     """
@@ -378,6 +395,6 @@ if __name__ == '__main__':
         reference_folder="D:/rop/UIEBD/reference-890/reference-890",
         output_folder='D:/rop/results/dl_optimizer',
         num_epochs=50,
-        batch_size=4,
+        batch_size=5,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
