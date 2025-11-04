@@ -1,6 +1,6 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-
+import argparse
 import torch
 import cv2
 import numpy as np
@@ -11,10 +11,7 @@ from enhancement_strategies import EnhancementStrategies
 
 
 class EnhancementPredictor:
-    """
-    影像增強預測器
-    使用訓練好的模型預測最佳參數並增強影像
-    """
+    
     def __init__(self, model_path, device='cuda'):
         """
         初始化預測器
@@ -40,23 +37,22 @@ class EnhancementPredictor:
         print(f"✓ 模型已載入（設備: {self.device}）")
     
     def predict_parameters(self, img):
-        """
-        預測單張影像的最佳參數
         
-        Args:
-            img: numpy array (H, W, 3), RGB, [0, 1]
-        
-        Returns:
-            params: 預測的參數字典
-        """
-        # 提取特徵
         features = self.feature_extractor.extract_all_features(img)
-        
-        # 預測參數
-        params = self.optimizer.predict_parameters(features)
-        
-        return params
+        with torch.no_grad():
+            params = self.optimizer.predict_parameters(features)
+
+            # 強制 clamp 參數，防止除以 0 或負數
+            params['omega'] = np.clip(params['omega'], 0.1, 0.9)
+            params['gamma'] = np.clip(params['gamma'], 0.5, 3.0)
+            params['L_low'] = np.clip(params['L_low'], 1.0, 30.0)
+            params['L_high'] = np.clip(params['L_high'], 65.0, 99.0)
+            params['guided_radius'] = np.clip(params['guided_radius'], 1.0, 50.0)
+            params['use_gamma'] = np.clip(params['use_gamma'], 0.0, 1.0)
     
+        return params
+        
+        
     def enhance_image(self, img, params=None):
         """
         增強影像
@@ -74,102 +70,78 @@ class EnhancementPredictor:
         
         # 應用增強
         enhanced = self.optimizer.apply_enhancement_with_params(img, params)
-        
+        if not np.isfinite(enhanced).all():
+            print(f"警告: 偵測到 NaN/inf，強制 clamp 到 [0,1]")
+            enhanced = np.nan_to_num(enhanced, nan=0.0, posinf=1.0, neginf=0.0)
+            enhanced = np.clip(enhanced, 0.0, 1.0)
         return enhanced
     
     def process_single_image(self, input_path, output_path=None, show_params=True):
         """
         處理單張影像
-        
-        Args:
-            input_path: 輸入影像路徑
-            output_path: 輸出路徑（如果為 None，自動生成）
-            show_params: 是否顯示預測的參數
-        
-        Returns:
-            enhanced: 增強後的影像
-            params: 預測的參數
         """
-        # 讀取影像
+        input_path = Path(input_path)
         img = cv2.imread(str(input_path))
         if img is None:
             raise ValueError(f"無法讀取影像: {input_path}")
-        
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        
+
         # 預測參數
         params = self.predict_parameters(img)
-        
         if show_params:
             print(f"\n預測的最佳參數:")
-            print(f"  omega (去霧強度): {params['omega']:.3f}")
-            print(f"  gamma (Gamma校正): {params['gamma']:.3f}")
-            print(f"  L_low (色彩下限): {params['L_low']:.1f}")
-            print(f"  L_high (色彩上限): {params['L_high']:.1f}")
-            print(f"  guided_radius (濾波半徑): {params['guided_radius']:.1f}")
-            print(f"  use_gamma (是否用Gamma): {params['use_gamma']:.3f}")
-        
+            for k, v in params.items():
+                print(f"  {k}: {v:.3f}")
+
         # 增強
         enhanced = self.enhance_image(img, params)
-        
-        # 儲存
-        if output_path is None: 
-            input_path = Path(input_path)
+        enhanced = np.clip(enhanced, 0.0, 1.0)  # 再次確保
+        enhanced_uint8 = (enhanced * 255).astype(np.uint8)
+        # === 輸出路徑處理 ===
+        if output_path is None:
             output_path = input_path.parent / f"{input_path.stem}_enhanced.png"
         else:
             output_path = Path(output_path)
-    
+            if output_path.suffix == '':  # 是資料夾
+                output_path.mkdir(parents=True, exist_ok=True)
+                output_path = output_path / f"{input_path.stem}_enhanced.png"
+            else:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if output_path.is_dir() or not output_path.suffix:
-            output_path.mkdir(parents=True, exist_ok=True)
-            input_name = Path(input_path).stem
-            output_path = output_path / f"{input_name}_enhanced.png"
-        else:
-            # 確保父資料夾存在
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        enhanced_uint8 = (enhanced * 255).astype(np.uint8)
+        # === 儲存 ===
+        enhanced_uint8 = (np.clip(enhanced, 0, 1) * 255).astype(np.uint8)
         enhanced_bgr = cv2.cvtColor(enhanced_uint8, cv2.COLOR_RGB2BGR)
         cv2.imwrite(str(output_path), enhanced_bgr)
-        
-        print(f"✓ 已儲存到: {output_path}")
+        print(f"儲存: {output_path}")
         
         return enhanced, params
     
     def process_folder(self, input_folder, output_folder):
-        """
-        批量處理資料夾中的所有影像
-        
-        Args:
-            input_folder: 輸入資料夾
-            output_folder: 輸出資料夾
-        """
         input_path = Path(input_folder)
         output_path = Path(output_folder)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # 收集所有影像
         image_files = list(input_path.glob('*.png')) + \
-                     list(input_path.glob('*.jpg')) + \
-                     list(input_path.glob('*.jpeg'))
+                    list(input_path.glob('*.jpg')) + \
+                    list(input_path.glob('*.jpeg'))
         
+        if not image_files:
+            print("找不到任何影像檔案！")
+            return
+
         print(f"\n找到 {len(image_files)} 張影像")
         print(f"開始批量處理...\n")
         
-        # 處理每張影像
         for i, img_path in enumerate(image_files, 1):
             print(f"[{i}/{len(image_files)}] 處理: {img_path.name}")
-            
             try:
                 output_file = output_path / f"{img_path.stem}_enhanced.png"
-                self.process_single_image(img_path, output_file, show_params=False)
-                
+                self.process_single_image(str(img_path), str(output_file), show_params=False)
             except Exception as e:
-                print(f"  ✗ 失敗: {e}")
+                print(f"  失敗: {e}")
         
-        print(f"\n✓ 批量處理完成！")
+        print(f"\n批量處理完成！")
         print(f"輸出資料夾: {output_path}")
-
 
 # ============================================
 # 使用範例
@@ -208,7 +180,7 @@ def example_batch_processing():
     
     # 批量處理
     predictor.process_folder(
-        input_folder='D:/rop/UIEBD/raw-890',
+        input_folder='D:/rop/UIEBD/challenging-60/challenging-60',
         output_folder='D:/rop/results/enhanced_output'
     )
 
@@ -231,25 +203,14 @@ def example_custom_enhancement():
     # 方案 A: 使用模型預測的參數
     params_predicted = predictor.predict_parameters(img)
     enhanced_auto = predictor.enhance_image(img, params_predicted)
-    
-    # 方案 B: 使用自訂參數
-    params_custom = {
-        'omega': 0.4,
-        'gamma': 1.3,
-        'L_low': 10,
-        'L_high': 95,
-        'guided_radius': 15,
-        'use_gamma': 0.8
-    }
-    enhanced_custom = predictor.enhance_image(img, params_custom)
+  
     
     # 儲存
     cv2.imwrite('enhanced_auto.png', 
                 cv2.cvtColor((enhanced_auto * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
-    cv2.imwrite('enhanced_custom.png', 
-                cv2.cvtColor((enhanced_custom * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+  
     
-    print("✓ 已生成兩種增強結果")
+  
 
 
 def example_compare_results():
@@ -296,36 +257,24 @@ def example_compare_results():
 # ============================================
 
 if __name__ == '__main__':
-    import argparse
-    
     parser = argparse.ArgumentParser(description='使用訓練好的模型進行影像增強')
-    parser.add_argument('--mode', type=str, default='single',
-                       choices=['single', 'batch', 'custom', 'compare'],
-                       help='執行模式')
-    parser.add_argument('--model', type=str, 
-                       default='D:/rop/results/dl_optimizer/best_model.pth',
-                       help='模型路徑')
-    parser.add_argument('--input', type=str,
-                       default='D:/rop/UIEBD/raw-890/raw-890/8_img_.png',
-                       help='輸入影像或資料夾')
-    parser.add_argument('--output', type=str,
-                       default="D:/rop/results/deep_learning",
-                       help='輸出路徑或資料夾')
-    
+    parser.add_argument('--input',  type=str, required=True, help='輸入影像或資料夾')
+    parser.add_argument('--output', type=str, required=True, help='輸出檔案或資料夾')
+    parser.add_argument('--model',  type=str, required=True, help='模型路徑')
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--device', type=str, default='cpu', choices=['cuda','cpu'])
+
     args = parser.parse_args()
-    
-    if args.mode == 'single':
-        # 單張影像
-        predictor = EnhancementPredictor(model_path=args.model)
+
+    predictor = EnhancementPredictor(model_path=args.model, device=args.device)
+
+    input_path  = Path(args.input)
+    output_path = Path(args.output)
+
+    # 自動判斷：單張 vs 資料夾
+    if input_path.is_file():                     # 單張圖片
         predictor.process_single_image(args.input, args.output)
-        
-    elif args.mode == 'batch':
-        # 批量處理
-        predictor = EnhancementPredictor(model_path=args.model)
+    elif input_path.is_dir():                    # 資料夾
         predictor.process_folder(args.input, args.output)
-        
-    elif args.mode == 'custom':
-        example_custom_enhancement()
-        
-    elif args.mode == 'compare':
-        example_compare_results()
+    else:
+        raise ValueError("輸入路徑不存在或不是檔案/資料夾")
